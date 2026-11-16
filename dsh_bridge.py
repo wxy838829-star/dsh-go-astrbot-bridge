@@ -49,6 +49,9 @@ DEFAULT_CONFIG = {
     "model": "",
     "auto_approve": True,
     "timeout_seconds": 420,
+    # /download 只允许这些目录下的文件（防止被当成任意文件读取器）
+    "download_roots": ["/root/workspace", "/sdcard/Download/DSH-Go", "/tmp"],
+    "download_max_mb": 20,
 }
 
 
@@ -231,11 +234,40 @@ def make_app(bridge: Bridge) -> web.Application:
             return web.json_response({"ok": True, "stopped": True})
         return web.json_response({"ok": True, "stopped": False})
 
+    async def download(request: web.Request) -> web.Response:
+        raw = str(request.query.get("path") or "").strip()
+        if not raw:
+            return web.json_response({"ok": False, "error": "缺少 path 参数"}, status=400)
+        target = os.path.realpath(os.path.expanduser(raw))
+        roots = [os.path.realpath(os.path.expanduser(r)) for r in bridge.cfg.get("download_roots") or []]
+        if not any(target == root or target.startswith(root + os.sep) for root in roots):
+            return web.json_response(
+                {"ok": False, "error": f"不允许下载白名单外的路径：{target}"}, status=403
+            )
+        if not os.path.isfile(target):
+            return web.json_response({"ok": False, "error": "文件不存在"}, status=404)
+        max_bytes = int(float(bridge.cfg.get("download_max_mb") or 20) * 1024 * 1024)
+        try:
+            size = os.path.getsize(target)
+        except OSError as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+        if size > max_bytes:
+            return web.json_response(
+                {"ok": False, "error": f"文件过大（{size} 字节，上限 {max_bytes}）"}, status=413
+            )
+        return web.FileResponse(
+            target,
+            headers={
+                "Content-Disposition": f'attachment; filename="{os.path.basename(target)}"'
+            },
+        )
+
     app = web.Application(client_max_size=8 * 1024 * 1024)
     app.router.add_route("*", "/health", _guard(health, bridge))
     app.router.add_route("*", "/ask", _guard(ask, bridge))
     app.router.add_route("*", "/reset", _guard(reset, bridge))
     app.router.add_route("*", "/stop", _guard(stop, bridge))
+    app.router.add_route("*", "/download", _guard(download, bridge))
     return app
 
 
