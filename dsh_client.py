@@ -1,7 +1,10 @@
 """dsh-go ACP 客户端。
 
 通过 Agent Client Protocol（JSON-RPC over stdio）驱动 `dsh --profile acp`，
-也就是手机上 dsh-go 的本机引擎。不依赖 AstrBot，可单独测试。
+也就是手机上 dsh-go 的本机引擎。
+
+在 AstrBot 里运行时用 `astrbot.api` 的 logger；被桥接服务独立调用时
+（那个环境没有 astrbot 包）自动退化为 stderr 输出。
 
 设计要点：
 - 常驻一个子进程，避免每条消息冷启动 8~12 秒（实测常驻后 1~3 秒）。
@@ -13,15 +16,48 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 import shutil
 import signal
+import sys
 import time
+# 日志：AstrBot 环境里按规范使用 astrbot.api 的 logger；
+# 桥接服务独立运行（没有 astrbot 包）时退化为一个极简的 stderr logger。
+# 刻意不引用标准库 logging，避免绕过 AstrBot 的日志体系。
+try:
+    from astrbot.api import logger  # type: ignore[no-redef]
+except ImportError:  # pragma: no cover - 仅独立运行时走到
+
+    class _PlainLogger:
+        """没有 AstrBot 时的最小 logger，只负责把消息写到 stderr。"""
+
+        @staticmethod
+        def _emit(level: str, args: tuple) -> None:
+            try:
+                sys.stderr.write("[dsh-go] " + level + ": " + " ".join(str(a) for a in args) + "\n")
+            except Exception:
+                pass
+
+        def debug(self, *args, **kwargs) -> None:  # noqa: D102
+            pass
+
+        def info(self, *args, **kwargs) -> None:  # noqa: D102
+            self._emit("INFO", args)
+
+        def warning(self, *args, **kwargs) -> None:  # noqa: D102
+            self._emit("WARN", args)
+
+        def error(self, *args, **kwargs) -> None:  # noqa: D102
+            self._emit("ERROR", args)
+
+        def exception(self, *args, **kwargs) -> None:  # noqa: D102
+            self._emit("ERROR", args)
+
+    logger = _PlainLogger()
+
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-logger = logging.getLogger("astrbot")
 
 PROTOCOL_VERSION = 1
 
@@ -103,7 +139,7 @@ class DshAcpClient:
         request_timeout: float = 600.0,
         auto_approve: bool = True,
         log_stderr: bool = True,
-        log: logging.Logger | None = None,
+        log=None,
     ) -> None:
         self.command = command
         self.cwd = cwd

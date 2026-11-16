@@ -1,8 +1,0 @@
-name: astrbot_plugin_dsh_go
-display_name: dsh-go 桥接
-desc: 把聊天指令转给手机上的 dsh-go 执行（改文件、跑命令、查网页），再把结果发回聊天
-short_desc: 聊天里遥控 dsh-go
-version: 1.0.0
-author: 主人 & DSH
-repo: https://github.com/
-astrbot_version: ">=4.10.0"
