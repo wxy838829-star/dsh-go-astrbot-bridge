@@ -1,0 +1,114 @@
+{
+  "enabled": {
+    "description": "总开关：关掉后 /dsh 与 dsh_go 工具都不可用",
+    "type": "bool",
+    "default": true
+  },
+  "dsh_bin": {
+    "description": "【仅本机模式】dsh 可执行文件路径；桥接模式下不用填",
+    "type": "string",
+    "default": "dsh"
+  },
+  "profile": {
+    "description": "dsh 启动用的 profile，一般不要改",
+    "type": "string",
+    "default": "acp"
+  },
+  "patch_files": {
+    "description": "【仅本机模式】dsh 补丁文件，用来指定模型渠道",
+    "type": "list",
+    "default": [
+      "~/.dsh/profiles/web/cordis.patch.yml"
+    ]
+  },
+  "extra_args": {
+    "description": "追加给 dsh 的额外命令行参数",
+    "type": "list",
+    "default": []
+  },
+  "work_dir": {
+    "description": "【仅本机模式】dsh 的工作目录",
+    "type": "string",
+    "default": "~"
+  },
+  "permission_mode": {
+    "description": "【仅本机模式】dsh 权限模式；手机上 proot 没有沙箱后端，通常只能是 danger-full-access",
+    "type": "string",
+    "default": "danger-full-access"
+  },
+  "env_api_keys": {
+    "description": "【仅本机模式】给 dsh 子进程补的环境变量，每行一个 KEY=VALUE",
+    "type": "text",
+    "default": ""
+  },
+  "model": {
+    "description": "【仅本机模式】指定模型，写 渠道/模型；留空用默认",
+    "type": "string",
+    "default": ""
+  },
+  "auto_approve": {
+    "description": "【仅本机模式】自动同意 dsh-go 的权限请求",
+    "type": "bool",
+    "default": true
+  },
+  "enable_llm_tool": {
+    "description": "允许聊天模型在不带 /dsh 时自己调用 dsh_go 工具",
+    "type": "bool",
+    "default": true
+  },
+  "admin_only": {
+    "description": "只允许 AstrBot 管理员使用（关掉则所有人可用，有风险）",
+    "type": "bool",
+    "default": true
+  },
+  "allowed_users": {
+    "description": "只允许这些用户 ID 使用，逗号分隔；填了就忽略 admin_only",
+    "type": "string",
+    "default": ""
+  },
+  "allowed_groups": {
+    "description": "只允许这些群 ID 使用，逗号分隔",
+    "type": "string",
+    "default": ""
+  },
+  "session_scope": {
+    "description": "上下文怎么分：chat 同一个群/私聊共享一段 dsh 会话，user 每人一段",
+    "type": "string",
+    "default": "chat"
+  },
+  "show_progress": {
+    "description": "执行过程中简短播报 dsh-go 正在用什么工具",
+    "type": "bool",
+    "default": true
+  },
+  "max_reply_chars": {
+    "description": "回给聊天的内容最多多少字，超出会截断",
+    "type": "int",
+    "default": 3500
+  },
+  "timeout_seconds": {
+    "description": "单个任务最长等多久（秒）",
+    "type": "int",
+    "default": 420
+  },
+  "bridge_url": {
+    "description": "桥接模式地址。AstrBot 与 dsh-go 不在同一 Linux 环境时填写，例如 http://127.0.0.1:6799；留空则用本机模式",
+    "type": "string",
+    "default": ""
+  },
+  "bridge_token": {
+    "description": "桥接服务口令，要和 dsh-go 那边启动 dsh_bridge.py 时的 --token 一致",
+    "type": "string",
+    "default": ""
+  },
+  "idle_shutdown_minutes": {
+    "description": "空闲多少分钟后自动关掉 dsh 子进程省资源，0 表示一直开着",
+    "type": "int",
+    "default": 20
+  },
+  "keep_context": {
+    "description": "同一段聊天里保持上下文，关掉则每条指令都是新对话",
+    "type": "bool",
+    "default": true
+  }
+}
