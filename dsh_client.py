@@ -454,7 +454,10 @@ class DshAcpClient:
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[req_id] = fut
         self._last_used = time.time()
-        effective = timeout or self.request_timeout
+        # timeout <= 0 表示不限时（写大项目时用）
+        effective = self.request_timeout if timeout is None else float(timeout)
+        if effective <= 0:
+            effective = None
         await self._send(
             {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
         )
@@ -474,7 +477,7 @@ class DshAcpClient:
                 else:
                     self.log.warning("[dsh-go] 超时任务 30 秒内没停下，会话可能仍被占用")
             self._pending.pop(req_id, None)
-            raise DshTimeout(f"{method} 超时（{effective:.0f} 秒）", effective)
+            raise DshTimeout(f"{method} 超时（{(effective or 0):.0f} 秒）", effective or 0)
         finally:
             self._last_used = time.time()
 

@@ -147,17 +147,19 @@ class Bridge:
             await client.set_model_for(sid, provider.strip(), model.strip())
         return sid
 
-    async def ask(self, text: str, key: str) -> dict:
+    async def ask(self, text: str, key: str, timeout: float | None = None) -> dict:
         client = await self.ensure_client()
         sid = await self.session_for(key, client)
         self.inflight += 1
         try:
             started = time.time()
-            result = await client.prompt(
-                sid,
-                text,
-                timeout=float(self.cfg.get("timeout_seconds") or 420),
+            raw_timeout = (
+                timeout if timeout is not None else self.cfg.get("timeout_seconds", 420)
             )
+            task_timeout = float(raw_timeout if raw_timeout is not None else 420)
+            if task_timeout <= 0:
+                task_timeout = None  # 不限时：写大项目时用
+            result = await client.prompt(sid, text, timeout=task_timeout)
             return {
                 "ok": result.ok,
                 "text": result.text,
@@ -203,11 +205,17 @@ def make_app(bridge: Bridge) -> web.Application:
         if not text:
             return web.json_response({"ok": False, "error": "text 不能为空"}, status=400)
         key = str(body.get("session") or "default")
+        req_timeout = body.get("timeout", None)
+        if req_timeout is not None:
+            try:
+                req_timeout = float(req_timeout)
+            except (TypeError, ValueError):
+                req_timeout = None
         if key in bridge.busy:
             return web.json_response({"ok": False, "error": "上一条任务还在跑"}, status=429)
         bridge.busy.add(key)
         try:
-            data = await bridge.ask(text, key)
+            data = await bridge.ask(text, key, timeout=req_timeout)
             return web.json_response(data)
         except DshNotRunningError as e:
             return web.json_response({"ok": False, "error": f"连不上 dsh：{e}"}, status=503)
@@ -288,6 +296,12 @@ async def main() -> None:
     parser.add_argument("--token", default=os.environ.get("DSH_BRIDGE_TOKEN", ""))
     parser.add_argument("--config", default="", help="JSON 配置文件，可覆盖默认配置")
     parser.add_argument("--idle-minutes", type=float, default=30)
+    parser.add_argument(
+        "--task-timeout",
+        type=float,
+        default=None,
+        help="单个任务超时秒数，0 表示不限时（默认取配置文件里的 timeout_seconds）",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -299,6 +313,8 @@ async def main() -> None:
     if args.config and os.path.exists(args.config):
         with open(args.config, encoding="utf-8") as f:
             cfg.update(json.load(f))
+    if args.task_timeout is not None:
+        cfg["timeout_seconds"] = args.task_timeout
 
     token = args.token
     if not token:
