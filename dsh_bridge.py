@@ -79,7 +79,8 @@ class Bridge:
         self.client: DshAcpClient | None = None
         self.lock = asyncio.Lock()
         self.sessions: dict[str, str] = {}
-        self.busy: set[str] = set()
+        self.busy: dict[str, float] = {}  # 聊天键 -> 开始时间，用于识别僵死占用
+        self.prompts: dict[str, asyncio.Task] = {}  # 聊天键 -> 正在跑的请求任务
         self.inflight = 0
         self.started_at = time.time()
         self._idle_task: asyncio.Task | None = None
@@ -168,6 +169,15 @@ class Bridge:
                 "elapsed": round(time.time() - started, 1),
                 "tools": result.tool_summary(),
             }
+        except asyncio.CancelledError:
+            # 调用方（插件）断开了：如果不在服务端把 DSH 那边的任务停掉，
+            # 这个会话会一直被占着，后续请求都会收到「上一条任务还在跑」。
+            try:
+                await asyncio.shield(client.cancel(sid))
+                LOG.info("调用方断开，已中断会话 %s 的任务", sid)
+            except Exception:
+                LOG.debug("断开后取消任务失败", exc_info=True)
+            raise
         finally:
             self.inflight = max(0, self.inflight - 1)
 
@@ -211,11 +221,21 @@ def make_app(bridge: Bridge) -> web.Application:
                 req_timeout = float(req_timeout)
             except (TypeError, ValueError):
                 req_timeout = None
+        # 占用超过上限时间的一律视为僵死（比如上一次进程被强杀），直接清掉
+        started_at = bridge.busy.get(key)
+        if started_at is not None and time.time() - started_at > max(
+            3600.0, float(bridge.cfg.get("timeout_seconds", 420) or 420) + 600
+        ):
+            bridge.busy.pop(key, None)
+            LOG.warning("清理僵死的会话占用：%s", key)
         if key in bridge.busy:
             return web.json_response({"ok": False, "error": "上一条任务还在跑"}, status=429)
-        bridge.busy.add(key)
+        bridge.busy[key] = time.time()
+        # 包成独立 task，/stop 就能精确取消这一次请求（哪怕引擎还在启动）
+        task = asyncio.create_task(bridge.ask(text, key, timeout=req_timeout))
+        bridge.prompts[key] = task
         try:
-            data = await bridge.ask(text, key, timeout=req_timeout)
+            data = await task
             return web.json_response(data)
         except DshNotRunningError as e:
             return web.json_response({"ok": False, "error": f"连不上 dsh：{e}"}, status=503)
@@ -225,7 +245,8 @@ def make_app(bridge: Bridge) -> web.Application:
             LOG.exception("处理任务异常")
             return web.json_response({"ok": False, "error": f"内部错误：{e}"}, status=500)
         finally:
-            bridge.busy.discard(key)
+            bridge.prompts.pop(key, None)
+            bridge.busy.pop(key, None)
 
     async def reset(request: web.Request) -> web.Response:
         body = await request.json() if request.can_read_body else {}
@@ -236,11 +257,29 @@ def make_app(bridge: Bridge) -> web.Application:
     async def stop(request: web.Request) -> web.Response:
         body = await request.json() if request.can_read_body else {}
         key = str((body or {}).get("session") or "default")
+
         sid = bridge.sessions.get(key)
+        task = bridge.prompts.get(key)
+        did = False
+
+        # 先让 DSH 那边停下（有会话才发得出去）
         if bridge.client is not None and sid:
-            await bridge.client.cancel(sid)
-            return web.json_response({"ok": True, "stopped": True})
-        return web.json_response({"ok": True, "stopped": False})
+            try:
+                await asyncio.shield(bridge.client.cancel(sid))
+                did = True
+            except Exception:
+                LOG.debug("停止时取消 DSH 任务失败", exc_info=True)
+
+        # 再掐断这次请求本身，让 finally 把占用清掉
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            did = True
+
+        # 兜底：不管上面成没成，占用标记一定清掉
+        bridge.prompts.pop(key, None)
+        bridge.busy.pop(key, None)
+        return web.json_response({"ok": True, "stopped": did})
 
     async def download(request: web.Request) -> web.Response:
         raw = str(request.query.get("path") or "").strip()
@@ -324,7 +363,9 @@ async def main() -> None:
     bridge = Bridge(cfg, token, idle_minutes=args.idle_minutes)
     app = make_app(bridge)
 
-    runner = web.AppRunner(app)
+    # handler_cancellation: 客户端断开时取消处理函数。
+    # 不加这个，调用方断开后服务端仍会把任务跑完、会话一直被占着。
+    runner = web.AppRunner(app, handler_cancellation=True)
     await runner.setup()
     site = web.TCPSite(runner, args.host, args.port)
     await site.start()
