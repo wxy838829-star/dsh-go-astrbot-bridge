@@ -60,6 +60,10 @@ def build_env(cfg: dict) -> dict[str, str]:
     mode = str(cfg.get("permission_mode") or "").strip()
     if mode:
         env["DSH_PERMISSION_MODE"] = mode
+    inj_env = str(cfg.get("injected_key_env") or "").strip()
+    inj_key = str(cfg.get("injected_key") or "").strip()
+    if inj_env and inj_key:
+        env[inj_env] = inj_key
     for line in str(cfg.get("env_api_keys") or "").replace(",", "\n").splitlines():
         line = line.strip()
         if "=" in line:
@@ -136,21 +140,63 @@ class Bridge:
                 LOG.debug("空闲关闭出错", exc_info=True)
             return
 
-    async def session_for(self, key: str, client: DshAcpClient) -> str:
+    async def session_for(self, key: str, client: DshAcpClient, model: str = "") -> str:
+        raw = (model or str(self.cfg.get("model") or "")).strip()
         sid = self.sessions.get(key)
         if sid and await client.resume_session(sid):
+            if "/" in raw:
+                provider, _, name = raw.partition("/")
+                await client.set_model_for(sid, provider.strip(), name.strip())
             return sid
         sid = await client.new_session(os.path.expanduser(str(self.cfg.get("work_dir") or "~")))
         self.sessions[key] = sid
-        raw = str(self.cfg.get("model") or "").strip()
         if "/" in raw:
-            provider, _, model = raw.partition("/")
-            await client.set_model_for(sid, provider.strip(), model.strip())
+            provider, _, name = raw.partition("/")
+            ok = await client.set_model_for(sid, provider.strip(), name.strip())
+            LOG.info("会话 %s 使用模型 %s（设置%s）", sid, raw, "成功" if ok else "失败")
         return sid
 
-    async def ask(self, text: str, key: str, timeout: float | None = None) -> dict:
+    # ---- 密钥相关：进程环境变量建好后无法修改，只能重建引擎 ----
+
+    @staticmethod
+    def _signature(env_name: str, key: str) -> str:
+        import hashlib
+        return hashlib.sha256(f"{env_name}:{key}".encode()).hexdigest()[:16]
+
+    def _key_sig(self) -> str:
+        return getattr(self, "_current_key_sig", "")
+
+    async def _rebuild_with_key(self, env_name: str, api_key: str) -> None:
+        sig = self._signature(env_name, api_key)
+        if self._key_sig() == sig:
+            return
+        LOG.info("请求携带 API 密钥，重建引擎并注入 %s", env_name)
+        client, self.client = self.client, None
+        if client is not None:
+            try:
+                await client.stop()
+            except Exception:
+                LOG.debug("关闭旧引擎出错", exc_info=True)
+        self.sessions.clear()
+        self.cfg["injected_key_env"] = env_name
+        self.cfg["injected_key"] = api_key
+        self._current_key_sig = sig
+
+    async def ask(
+        self,
+        text: str,
+        key: str,
+        timeout: float | None = None,
+        model: str = "",
+        api_key: str = "",
+        api_key_env: str = "",
+    ) -> dict:
+        # 请求里带了新的密钥就重建引擎（进程环境变量建好后改不了）
+        if api_key and api_key_env:
+            if self.client is None or self._key_sig() != self._signature(api_key_env, api_key):
+                await self._rebuild_with_key(api_key_env, api_key)
         client = await self.ensure_client()
-        sid = await self.session_for(key, client)
+        sid = await self.session_for(key, client, model=model)
         self.inflight += 1
         try:
             started = time.time()
@@ -215,6 +261,9 @@ def make_app(bridge: Bridge) -> web.Application:
         if not text:
             return web.json_response({"ok": False, "error": "text 不能为空"}, status=400)
         key = str(body.get("session") or "default")
+        req_model = str(body.get("model") or "")
+        req_api_key = str(body.get("api_key") or "")
+        req_api_key_env = str(body.get("api_key_env") or "")
         req_timeout = body.get("timeout", None)
         if req_timeout is not None:
             try:
@@ -232,7 +281,12 @@ def make_app(bridge: Bridge) -> web.Application:
             return web.json_response({"ok": False, "error": "上一条任务还在跑"}, status=429)
         bridge.busy[key] = time.time()
         # 包成独立 task，/stop 就能精确取消这一次请求（哪怕引擎还在启动）
-        task = asyncio.create_task(bridge.ask(text, key, timeout=req_timeout))
+        task = asyncio.create_task(
+            bridge.ask(
+                text, key, timeout=req_timeout,
+                model=req_model, api_key=req_api_key, api_key_env=req_api_key_env,
+            )
+        )
         bridge.prompts[key] = task
         try:
             data = await task

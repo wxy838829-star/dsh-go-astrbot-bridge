@@ -554,7 +554,10 @@ class DshAcpClient:
     async def set_model_for(self, session_id: str, provider: str, model: str) -> bool:
         if not provider or not model:
             return False
-        value = json.dumps([provider, model], ensure_ascii=False)
+        # 必须用无空格的紧凑 JSON：引擎按字符串精确匹配选项值，
+        # json.dumps 默认会输出 '["p", "m"]'（逗号后带空格），匹配不上会报
+        # unknown model option。
+        value = json.dumps([provider, model], ensure_ascii=False, separators=(",", ":"))
         if self._models and (provider, model) not in self._models:
             self.log.warning(
                 "[dsh-go] 模型 %s/%s 不在可选列表里，仍尝试设置", provider, model
